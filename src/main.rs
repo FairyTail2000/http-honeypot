@@ -65,14 +65,13 @@ fn empty() -> BoxBody<Bytes, hyper::Error> {
 }
 
 async fn handle(req: Request<hyper::body::Incoming>, tx: Sender<WriteRequest>, ip: String, port: u16) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
-    let mut headers_map: HashMap<String, SafeValue> = HashMap::new();
-    let headers = req.headers();
     log::trace!("Converting headers to map");
-    for (key, value) in headers.iter() {
+    let headers_map: HashMap<String, SafeValue> = req.headers().iter().map(|(key, value)| {
         let key_str = key.as_str().to_owned();
         let val = header_value_to_string(value);
-        headers_map.insert(key_str, val);
-    }
+        (key_str, val)
+    }).collect();
+
     log::trace!("Converting headers to json");
     match serde_json::to_string(&headers_map) {
         Ok(headers) => {

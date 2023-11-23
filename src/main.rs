@@ -128,9 +128,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .default_value("requests.sqlite")
             .env("DATABASE")
         )
+        .arg(
+            Arg::new("queuesize")
+                .short('q')
+                .long("queuesize")
+                .value_parser(value_parser!(usize))
+                .action(ArgAction::Set)
+                .default_value("10000")
+                .env("QUEUESIZE")
+        )
         .get_matches();
     let port = *cmd.get_one::<u16>("port").expect("`port` should be non empty");
     let db: String = cmd.get_one::<String>("database").expect("`database` should be non empty").clone();
+    let queuesize = *cmd.get_one::<usize>("queuesize").expect("`queuesize` should be non empty");
     Builder::from_env(Env::default())
         .format(|buf, record| {
             writeln!(
@@ -152,7 +162,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let listener = TcpListener::bind(&addrs[..]).await.unwrap();
 
     // main channel
-    let (tx, mut rx) = mpsc::channel::<WriteRequest>(10000); // Channel for write requests
+    let (tx, mut rx) = mpsc::channel::<WriteRequest>(queuesize); // Channel for write requests
     // Control channel
     let (write_cache_tx, mut write_cache_rx) = mpsc::channel::<bool>(1); // Channel for write requests
 

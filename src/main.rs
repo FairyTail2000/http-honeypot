@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
-use rusqlite::{params, Connection, Result};
+use rusqlite::{params, Connection, Error, Result};
 use std::net::SocketAddr;
 use clap::{Arg, ArgAction, Command, value_parser};
 use env_logger::{Builder, Env};
@@ -98,7 +98,7 @@ fn set_db_options(conn: &mut Connection) {
     };
 }
 
-async fn database(db: &str, mut rx: Receiver<WriteRequest>, mut write_cache_rx: Receiver<bool>) {
+async fn database(db: &str, mut rx: Receiver<WriteRequest>, mut write_cache_rx: Receiver<bool>) -> Result<(), Error> {
     log::debug!("Started db connection task");
     log::trace!("Trying to open an sqlite conn to {}", db);
     let mut conn = match Connection::open(db) {
@@ -108,7 +108,7 @@ async fn database(db: &str, mut rx: Receiver<WriteRequest>, mut write_cache_rx: 
         }
         Err(err) => {
             log::error!("Failed to open database: {}", err);
-            return;
+            return Err(err);
         }
     };
     set_db_options(&mut conn);
@@ -118,7 +118,7 @@ async fn database(db: &str, mut rx: Receiver<WriteRequest>, mut write_cache_rx: 
         Ok(_) => log::debug!("Finished create table"),
         Err(err) => {
             log::error!("Failed to create requests table {}", err);
-            return;
+            return Err(err);
         }
     };
     log::trace!("Waiting to receive requests over the channel");
@@ -127,7 +127,7 @@ async fn database(db: &str, mut rx: Receiver<WriteRequest>, mut write_cache_rx: 
         Ok(prepped) => prepped,
         Err(err) => {
             log::error!("Cannot prepare requests insert statement: {}", err);
-            return;
+            return Err(err);
         }
     };
 
@@ -146,7 +146,7 @@ async fn database(db: &str, mut rx: Receiver<WriteRequest>, mut write_cache_rx: 
                     Ok(continue_exec) => {
                         log::debug!("Received cache flush request");
                         match conn.cache_flush() {
-                            Ok(_) => log::info!("Wrote db cache to disk, bye bye"),
+                            Ok(_) => log::info!("Wrote db cache to disk"),
                             Err(err) => log::error!("Could not write db cache to disk! {}", err)
                         }
                         if !continue_exec {
@@ -180,8 +180,7 @@ async fn database(db: &str, mut rx: Receiver<WriteRequest>, mut write_cache_rx: 
             }
         }
     }
-    // Successfully wrote the db, no messages in the queue, kill everything
-    exit(0);
+    Ok(())
 }
 
 async fn write_signal_sender(write_cache_tx: Sender<bool>) {
@@ -263,7 +262,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         ];
         log::trace!("Trying to listen on port {} on 0.0.0.0 and [::]", port);
         match TcpListener::bind(&addrs[..]).await {
-            Ok(l) => l,
+            Ok(l) => {
+                log::info!("Listening on port {} on 0.0.0.0 and [::]", port);
+                l
+            },
             Err(err) => {
                 log::error!("Failed listen on ports: {}", err);
                 exit(-1);
@@ -275,7 +277,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         ];
         log::trace!("Trying to listen on port {} on 0.0.0.0", port);
         match TcpListener::bind(&addrs[..]).await {
-            Ok(l) => l,
+            Ok(l) => {
+                log::info!("Listening on port {} on 0.0.0.0", port);
+                l
+            },
             Err(err) => {
                 log::error!("Failed listen on port: {}", err);
                 exit(-1);
@@ -290,19 +295,187 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (write_cache_tx, write_cache_rx) = channel::<bool>(1); // Channel for write cache requests
 
     let cloned_write_cache_tx = write_cache_tx.clone();
+    let ctrl_shutdown_write_cache_tx = write_cache_tx.clone();
+    #[cfg(unix)]
+    let usr1_write_cache_tx = write_cache_tx.clone();
     let db_cache_write_handle = tokio::spawn(async move {
         write_signal_sender(write_cache_tx).await;
     });
 
     tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.unwrap();
-        db_cache_write_handle.abort();
-        match cloned_write_cache_tx.send(false).await {
-            Ok(_) => log::debug!("Send last request to flush sqlite cache"),
-            Err(err) => { 
-                log::error!("Unable to send flush sqlite cache request: {}", err);
-                // Well fuck database thread panicked
-                exit(-1);
+        log::trace!("Registering and waiting for ctrl+c");
+        match tokio::signal::ctrl_c().await { 
+            Ok(_) => {
+                log::info!("Received ctrl+c, aborting regular cache write");
+                db_cache_write_handle.abort();
+                match cloned_write_cache_tx.send(false).await {
+                    Ok(_) => log::debug!("Send last request to flush sqlite cache"),
+                    Err(err) => {
+                        log::error!("Unable to send flush sqlite cache request: {}", err);
+                        // Well fuck database thread panicked
+                        exit(-1);
+                    }
+                }
+            }
+            Err(err) => {
+                log::error!("Failed listening ctrl+c: {}", err);
+            }
+        }
+    });
+
+    #[cfg(windows)]
+    tokio::spawn(async move {
+        let mut shutdown = match tokio::signal::windows::ctrl_shutdown() {
+            Ok(ctrl) => {
+                ctrl
+            }
+            Err(err) => {
+                log::error!("Failed listening ctrl+shutdown: {}", err);
+                return;
+            }
+        };
+        let mut logoff = match tokio::signal::windows::ctrl_logoff() {
+            Ok(ctrl) => {
+                ctrl
+            }
+            Err(err) => {
+                log::error!("Failed listening ctrl+logoff: {}", err);
+                return;
+            }
+        };
+        let mut break_handler = match tokio::signal::windows::ctrl_break() {
+            Ok(ctrl) => {
+                ctrl
+            }
+            Err(err) => {
+                log::error!("Failed listening ctrl+break: {}", err);
+                return;
+            }
+        };
+        let mut close = match tokio::signal::windows::ctrl_close() {
+            Ok(ctrl) => {
+                ctrl
+            }
+            Err(err) => {
+                log::error!("Failed listening ctrl+close: {}", err);
+                return;
+            }
+        };
+        
+        match tokio::select! {
+            _ = shutdown.recv() => {}
+            _ = logoff.recv() => {}
+            _ = close.recv() => {}
+            _ = break_handler.recv() => {}
+        } { 
+            _ => {
+                match ctrl_shutdown_write_cache_tx.send(false).await {
+                    Ok(_) => log::debug!("Send last request to flush sqlite cache"),
+                    Err(err) => {
+                        log::error!("Unable to send flush sqlite cache request after ctrl_shutdown/break/logoff/close: {}", err);
+                        // Well fuck database thread panicked
+                        exit(-1);
+                    }
+                }
+            }
+        };
+    });
+
+    #[cfg(unix)]
+    tokio::spawn(async move {
+        log::trace!("Trying to register SIG_TERM handler");
+        let mut term_signal = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(term_signal) => {
+                log::trace!("Registered SIG_TERM handler");
+                term_signal
+            },
+            Err(err) => {
+                log::error!("Failed listening term signal: {}", err);
+                return;
+            }
+        };
+        log::trace!("Trying to register SIG_HANG handler");
+        let mut hangup_signal = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
+            Ok(hangup_signal) => {
+                log::trace!("Registered SIG_HANGUP handler");
+                hangup_signal
+            },
+            Err(err) => {
+                log::error!("Failed listening hang signal: {}", err);
+                return;
+            }
+        };
+        log::trace!("Trying to register SIG_PIPE handler");
+        let mut pipe_signal = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::pipe()) {
+            Ok(pipe_signal) => {
+                log::trace!("Registered SIG_PIPE handler");
+                pipe_signal
+            },
+            Err(err) => {
+                log::error!("Failed listening pipe signal: {}", err);
+                return;
+            }
+        };
+        log::trace!("Trying to register SIG_QUIT handler");
+        let mut quit_signal = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::quit()) {
+            Ok(quit_signal) => {
+                log::trace!("Registered SIG_QUIT handler");
+                quit_signal
+            },
+            Err(err) => {
+                log::error!("Failed listening quit signal: {}", err);
+                return;
+            }
+        };
+        match tokio::select! {
+            _ = term_signal.recv() => {}
+            _ = hangup_signal.recv() => {}
+            _ = pipe_signal.recv() => {}
+            _ = quit_signal.recv() => {}
+        } {
+            _ => {
+                log::trace!("Received either of term, hangup, pipe or quit");
+                match ctrl_shutdown_write_cache_tx.send(false).await {
+                    Ok(_) => log::debug!("Send last request to flush sqlite cache"),
+                    Err(err) => {
+                        log::error!("Unable to send flush sqlite cache request after receiving term/hangup/pipe/quit signal: {}", err);
+                        // Well fuck database thread panicked
+                        exit(-1);
+                    }
+                }
+            }
+        };
+    });
+
+    #[cfg(unix)]
+    tokio::spawn(async move {
+        log::trace!("Trying to register SIG_USR1 handler");
+        let mut usr1_signal = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1()) {
+            Ok(usr1_signal) => {
+                log::trace!("Registered SIG_USR1 handler");
+                usr1_signal
+            },
+            Err(err) => {
+                log::error!("Failed listening term signal: {}", err);
+                return;
+            }
+        };
+        loop {
+            match usr1_signal.recv().await {
+                Some(_) => {
+                    log::debug!("Sending request to flush sqlite cache because usr1 was received");
+                    match usr1_write_cache_tx.send(true).await {
+                        Ok(_) => log::debug!("Send request to flush sqlite cache"),
+                        Err(err) => {
+                            log::error!("Unable to send flush sqlite cache request after receiving usr1 signal: {}. Unable to receive further usr1 signals.", err);
+                            break;
+                        }
+                    }
+                }
+                None => {
+                    log::trace!("No usr1 signals can be received anymore");
+                    break;
+                }
             }
         }
     });
@@ -312,7 +485,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match tokio::runtime::Builder::new_current_thread().enable_time().build() {
             Ok(rt) => {
                 rt.block_on(async move {
-                    database(&db, rx, write_cache_rx).await;
+                    match database(&db, rx, write_cache_rx).await {
+                        Ok(_) => {
+                            log::info!("Database task finished");
+                            exit(0);
+                        },
+                        Err(_) => {
+                            log::error!("Database task finished with error");
+                            // exit(-1)
+                        }
+                    };
                 });
             }
             Err(err) => {

@@ -195,7 +195,7 @@ async fn write_signal_sender(write_cache_tx: Sender<bool>) {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn main() {
     let cmd = Command::new("http-honeypot")
         .version("1.0.0")
         .author("Rafael Sundorf <developer.rafael.sundorf@gmail.com>")
@@ -509,7 +509,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         },
                         Err(_) => {
                             log::error!("Database task finished with error");
-                            // exit(-1)
+                            exit(-1)
                         }
                     };
                 });

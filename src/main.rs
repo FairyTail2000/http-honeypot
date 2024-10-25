@@ -325,8 +325,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     #[cfg(windows)]
     tokio::spawn(async move {
+        log::trace!("Registering ctrl+shutdown handler");
         let mut shutdown = match tokio::signal::windows::ctrl_shutdown() {
             Ok(ctrl) => {
+                log::trace!("Registered ctrl+shutdown handler");
                 ctrl
             }
             Err(err) => {
@@ -334,8 +336,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 return;
             }
         };
+        log::trace!("Registering ctrl+logoff handler");
         let mut logoff = match tokio::signal::windows::ctrl_logoff() {
             Ok(ctrl) => {
+                log::trace!("Registered ctrl+logoff handler");
                 ctrl
             }
             Err(err) => {
@@ -343,8 +347,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 return;
             }
         };
+        log::trace!("Registering ctrl+break handler");
         let mut break_handler = match tokio::signal::windows::ctrl_break() {
             Ok(ctrl) => {
+                log::trace!("Registered ctrl+break handler");
                 ctrl
             }
             Err(err) => {
@@ -352,8 +358,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 return;
             }
         };
+        log::trace!("Registering ctrl+close handler");
         let mut close = match tokio::signal::windows::ctrl_close() {
             Ok(ctrl) => {
+                log::trace!("Registered ctrl+close handler");
                 ctrl
             }
             Err(err) => {
@@ -362,21 +370,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
         };
         
-        match tokio::select! {
-            _ = shutdown.recv() => {}
-            _ = logoff.recv() => {}
-            _ = close.recv() => {}
-            _ = break_handler.recv() => {}
-        } { 
-            _ => {
-                match ctrl_shutdown_write_cache_tx.send(false).await {
-                    Ok(_) => log::debug!("Send last request to flush sqlite cache"),
-                    Err(err) => {
-                        log::error!("Unable to send flush sqlite cache request after ctrl_shutdown/break/logoff/close: {}", err);
-                        // Well fuck database thread panicked
-                        exit(-1);
-                    }
-                }
+        tokio::select! {
+            _ = shutdown.recv() => {
+                log::debug!("Received shutdown signal");
+            }
+            _ = logoff.recv() => {
+                log::debug!("Received logoff signal");
+            }
+            _ = close.recv() => {
+                log::debug!("Received close signal");
+            }
+            _ = break_handler.recv() => {
+                log::debug!("Received break signal");
+            }
+        }
+        match ctrl_shutdown_write_cache_tx.send(false).await {
+            Ok(_) => log::debug!("Send last request to flush sqlite cache"),
+            Err(err) => {
+                log::error!("Unable to send flush sqlite cache request after ctrl_shutdown/break/logoff/close: {}", err);
+                // Well fuck database thread panicked
+                exit(-1);
             }
         };
     });
@@ -427,22 +440,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 return;
             }
         };
-        match tokio::select! {
-            _ = term_signal.recv() => {}
-            _ = hangup_signal.recv() => {}
-            _ = pipe_signal.recv() => {}
-            _ = quit_signal.recv() => {}
-        } {
-            _ => {
-                log::trace!("Received either of term, hangup, pipe or quit");
-                match ctrl_shutdown_write_cache_tx.send(false).await {
-                    Ok(_) => log::debug!("Send last request to flush sqlite cache"),
-                    Err(err) => {
-                        log::error!("Unable to send flush sqlite cache request after receiving term/hangup/pipe/quit signal: {}", err);
-                        // Well fuck database thread panicked
-                        exit(-1);
-                    }
-                }
+        tokio::select! {
+            _ = term_signal.recv() => {
+                log::debug!("Received term signal");
+            }
+            _ = hangup_signal.recv() => {
+                log::debug!("Received hang signal");
+            }
+            _ = pipe_signal.recv() => {
+                log::debug!("Received pipe signal");
+            }
+            _ = quit_signal.recv() => {
+                log::debug!("Received quit signal");
+            }
+        }
+        match ctrl_shutdown_write_cache_tx.send(false).await {
+            Ok(_) => log::debug!("Send last request to flush sqlite cache"),
+            Err(err) => {
+                log::error!("Unable to send flush sqlite cache request after receiving term/hangup/pipe/quit signal: {}", err);
+                // Well fuck database thread panicked
+                exit(-1);
             }
         };
     });

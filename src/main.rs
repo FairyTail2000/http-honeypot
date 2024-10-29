@@ -189,9 +189,13 @@ async fn write_signal_sender(write_cache_tx: Sender<bool>) {
         tokio::time::sleep(Duration::new(60, 0)).await;
         match write_cache_tx.send(true).await {
             Ok(_) => log::debug!("Send cache flush request"),
-            Err(err) => log::error!("Failed to send cache flush request: {}", err)
+            Err(err) => {
+                log::error!("Failed to send cache flush request: {}", err);
+                break;
+            }
         }
     }
+    log::debug!("Stopped thread to send cache write signal periodically because the database thread exited");
 }
 
 #[tokio::main]
